@@ -1,9 +1,28 @@
+/*
+  Easy Prompts — Validador y Normalizador Jerárquico JSON (amlc-70)
+  Copyright (C) 2026 Adrián (amlc / amlc-70)
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 "use strict";
 
 (function (global) {
   const ESQUEMA_VERSION = "1.0.0";
+  const MAX_CARACTERES_JSON = 262144; // 256 KiB de entrada máxima para proteger memoria
 
-  const GUIAS_PROVEEDOR = {
+  const GUIAS_PROVEEDOR = Object.freeze({
     gemini: [
       "Usar delimitadores consistentes (etiquetas XML o encabezados Markdown) y ubicar instrucciones o anclas claras.",
       "Definir esquema estructurado estricto cuando se solicite JSON y validar siempre los valores."
@@ -23,13 +42,13 @@
     otra: [
       "Declarar explícitamente el formato de salida, las restricciones de alcance y los criterios de verificación."
     ]
-  };
+  });
 
-  const SUGERENCIAS_INVESTIGACION = [
+  const SUGERENCIAS_INVESTIGACION = Object.freeze([
     "Separar explícitamente hechos verificados, inferencias/hipótesis y zonas de incertidumbre.",
     "Exigir trazabilidad, criterios de falsabilidad y contraejemplos antes de cerrar conclusiones.",
     "Prohibir la fabricación de fuentes, citas, métricas o referencias inexistentes."
-  ];
+  ]);
 
   function limpiarTexto(valor) {
     if (typeof valor !== "string") {
@@ -44,13 +63,13 @@
     }
     const vistos = new Set();
     const resultado = [];
-    lista.forEach(function (item) {
-      const texto = limpiarTexto(String(item || ""));
+    for (let i = 0; i < lista.length; i += 1) {
+      const texto = limpiarTexto(String(lista[i] || ""));
       if (texto && !vistos.has(texto)) {
         vistos.add(texto);
         resultado.push(texto);
       }
-    });
+    }
     return resultado;
   }
 
@@ -81,10 +100,10 @@
     const modoNombre = limpiarTexto(datos.modo_nombre_ia) || "ninguno";
     const requiereNombreIa = modoNombre === "asignado";
 
-    const guiasProveedor = [
-      ...(GUIAS_PROVEEDOR[iaSeleccionada] || GUIAS_PROVEEDOR.otra),
-      ...(modoInvestigacion ? SUGERENCIAS_INVESTIGACION : [])
-    ];
+    const baseGuias = GUIAS_PROVEEDOR[iaSeleccionada] || GUIAS_PROVEEDOR.otra;
+    const guiasProveedor = modoInvestigacion
+      ? baseGuias.concat(SUGERENCIAS_INVESTIGACION)
+      : baseGuias.slice();
 
     return {
       json_exclusivo: jsonExclusivo,
@@ -130,6 +149,9 @@
     if (!limpiarTexto(datos.objetivo_principal)) {
       errores.push("El objetivo principal del trabajo es obligatorio.");
     }
+    if (cond.requiere_nombre_ia && !limpiarTexto(datos.nombre_ia)) {
+      errores.push("Seleccionaste nombre asignado para la IA: debes indicar el nombre.");
+    }
     if (!limpiarTexto(datos.rol_ia)) {
       errores.push("El rol o persona de la IA es obligatorio.");
     }
@@ -162,8 +184,144 @@
   }
 
   /**
+   * Normaliza un objeto importado para garantizar que cumpla la estructura
+   * jerárquica de Easy Prompts sin alterar tipos esperados.
+   */
+  function normalizarEstructuraImportada(rawData, cambios) {
+    const listaCambios = Array.isArray(cambios) ? cambios : [];
+    if (!rawData || typeof rawData !== "object" || Array.isArray(rawData)) {
+      return {
+        ok: false,
+        error: "La raíz del JSON debe ser un objeto jerárquico válido."
+      };
+    }
+
+    const meta = rawData.metadata && typeof rawData.metadata === "object" ? rawData.metadata : {};
+    const idIa = rawData.identidad_ia && typeof rawData.identidad_ia === "object" ? rawData.identidad_ia : {};
+    const trabajo = rawData.trabajo && typeof rawData.trabajo === "object" ? rawData.trabajo : {};
+    const limites = rawData.limites && typeof rawData.limites === "object" ? rawData.limites : {};
+
+    const formatosRaw = limpiarArregloTexto(idIa.formato_salida);
+    const tieneJsonPuro = formatosRaw.includes("json_puro");
+    const formatosNormalizados = tieneJsonPuro ? ["json_puro"] : formatosRaw;
+    if (tieneJsonPuro && formatosRaw.length > 1) {
+      listaCambios.push("Se aplicó exclusividad de 'json_puro' descartando formatos adicionales.");
+    }
+
+    const limitesPers = Array.isArray(limites.limites_personalizados)
+      ? limpiarArregloTexto(limites.limites_personalizados)
+      : limpiarArregloTexto(
+          typeof limites.limites_personalizados === "string"
+            ? limites.limites_personalizados.split(/\n+/)
+            : []
+        );
+
+    const normalizado = {
+      _comentario: limpiarTexto(rawData._comentario) || "Objeto jerárquico de configuración de prompt para ejecución controlada",
+      metadata: {
+        _comentario: limpiarTexto(meta._comentario) || "Parámetros de entorno, idioma, nivel de instancia y guías del proveedor",
+        version_esquema: limpiarTexto(meta.version_esquema) || ESQUEMA_VERSION,
+        proveedor_ia: limpiarTexto(meta.proveedor_ia),
+        idioma_prompt: limpiarTexto(meta.idioma_prompt) || "es",
+        idioma_instancia: limpiarTexto(meta.idioma_instancia) || limpiarTexto(meta.idioma_prompt) || "es",
+        nivel_instancia: limpiarTexto(meta.nivel_instancia),
+        guias_proveedor_aplicadas: limpiarArregloTexto(meta.guias_proveedor_aplicadas)
+      },
+      identidad_ia: {
+        _comentario: limpiarTexto(idIa._comentario) || "Identidad nominal, rol, estilo comunicativo, profundidad y formato de respuesta",
+        modo_nombre: limpiarTexto(idIa.modo_nombre) || "ninguno",
+        nombre_ia: idIa.nombre_ia ? limpiarTexto(String(idIa.nombre_ia)) : null,
+        instruccion_nombre: idIa.instruccion_nombre ? limpiarTexto(String(idIa.instruccion_nombre)) : null,
+        rol: limpiarTexto(idIa.rol),
+        especializacion: limpiarTexto(idIa.especializacion),
+        tono_estilo: limpiarTexto(idIa.tono_estilo),
+        nivel_profundidad: limpiarTexto(idIa.nivel_profundidad),
+        formato_salida: formatosNormalizados
+      },
+      trabajo: {
+        _comentario: limpiarTexto(trabajo._comentario) || "Definición del desarrollo web, objetivo, contexto y entregables esperados",
+        tipos_aplicacion_web: limpiarArregloTexto(trabajo.tipos_aplicacion_web),
+        objetivo_principal: limpiarTexto(trabajo.objetivo_principal),
+        contexto_entorno: limpiarTexto(trabajo.contexto_entorno),
+        entregables_esperados: limpiarArregloTexto(trabajo.entregables_esperados),
+        criterios_exclusion: limpiarTexto(trabajo.criterios_exclusion)
+      },
+      limites: {
+        _comentario: limpiarTexto(limites._comentario) || "Restricciones críticas de veracidad, ética/control humano, arquitectura y conducta",
+        rigor_epistemico: limpiarArregloTexto(limites.rigor_epistemico),
+        etica_y_control_humano: limpiarArregloTexto(limites.etica_y_control_humano),
+        limites_tecnicos: limpiarArregloTexto(limites.limites_tecnicos),
+        comportamiento_y_formato: limpiarArregloTexto(limites.comportamiento_y_formato),
+        limites_personalizados: limitesPers
+      }
+    };
+
+    return { ok: true, data: normalizado };
+  }
+
+  /**
+   * Convierte cadenas delimitadas por comillas simples '...' a comillas dobles "..."
+   * fuera de cadenas delimitadas por comillas dobles ya existentes.
+   */
+  function convertirComillasSimplesADobles(texto) {
+    let salida = "";
+    let enDoble = false;
+    let enSimple = false;
+    let escape = false;
+    let seConvirtio = false;
+
+    for (let i = 0; i < texto.length; i += 1) {
+      const ch = texto[i];
+
+      if (enDoble) {
+        salida += ch;
+        if (escape) {
+          escape = false;
+        } else if (ch === "\\") {
+          escape = true;
+        } else if (ch === '"') {
+          enDoble = false;
+        }
+        continue;
+      }
+
+      if (enSimple) {
+        if (escape) {
+          salida += ch === "'" ? "'" : ch;
+          escape = false;
+        } else if (ch === "\\") {
+          escape = true;
+          salida += "\\";
+        } else if (ch === "'") {
+          enSimple = false;
+          salida += '"';
+          seConvirtio = true;
+        } else if (ch === '"') {
+          salida += '\\"';
+        } else {
+          salida += ch;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        enDoble = true;
+        salida += ch;
+      } else if (ch === "'") {
+        enSimple = true;
+        salida += '"';
+        seConvirtio = true;
+      } else {
+        salida += ch;
+      }
+    }
+
+    return { texto: salida, convertido: seConvirtio };
+  }
+
+  /**
    * Intenta parsear JSON estricto; si falla, aplica correcciones seguras
-   * (comentarios // o /* */, comas colgantes, comillas tipográficas) y reporta.
+   * (comillas curvas/simples, comentarios // o /* *, comas colgantes) y normaliza esquema.
    */
   function analizarYCorregirJson(textoEntrada) {
     const original = typeof textoEntrada === "string" ? textoEntrada : "";
@@ -178,13 +336,34 @@
       };
     }
 
+    if (trimmed.length > MAX_CARACTERES_JSON) {
+      return {
+        ok: false,
+        corregido: false,
+        data: null,
+        cambios: [],
+        error: `El JSON excede el límite de seguridad (${MAX_CARACTERES_JSON} caracteres).`
+      };
+    }
+
     try {
       const directo = JSON.parse(trimmed);
+      const cambiosDirectos = [];
+      const normDirecta = normalizarEstructuraImportada(directo, cambiosDirectos);
+      if (!normDirecta.ok) {
+        return {
+          ok: false,
+          corregido: false,
+          data: null,
+          cambios: [],
+          error: normDirecta.error
+        };
+      }
       return {
         ok: true,
-        corregido: false,
-        data: directo,
-        cambios: [],
+        corregido: cambiosDirectos.length > 0,
+        data: normDirecta.data,
+        cambios: cambiosDirectos,
         error: null
       };
     } catch (_errDirecto) {
@@ -194,12 +373,10 @@
     const cambios = [];
     let candidato = trimmed;
 
-    // 1. Comillas tipográficas curvas -> rectas
-    const sinCurvas = candidato
-      .replace(/[\u201C\u201D]/g, '"')
-      .replace(/[\u2018\u2019]/g, "'");
-    if (sinCurvas !== candidato) {
-      candidato = sinCurvas;
+    // 1. Comillas tipográficas curvas dobles -> rectas dobles
+    const sinCurvasDobles = candidato.replace(/[\u201C\u201D]/g, '"');
+    if (sinCurvasDobles !== candidato) {
+      candidato = sinCurvasDobles;
       cambios.push("Se normalizaron comillas tipográficas curvas a comillas rectas.");
     }
 
@@ -262,7 +439,15 @@
       cambios.push("Se retiraron comentarios no estándar (// o /* */) para cumplir JSON estricto.");
     }
 
-    // 3. Eliminar comas finales colgantes antes de } o ]
+    // 3. Normalizar comillas simples curvas/rectas usadas como delimitadores
+    const sinCurvasSimples = candidato.replace(/[\u2018\u2019]/g, "'");
+    const resSimples = convertirComillasSimplesADobles(sinCurvasSimples);
+    if (resSimples.convertido || sinCurvasSimples !== candidato) {
+      candidato = resSimples.texto;
+      cambios.push("Se convirtieron comillas simples delimitadoras a comillas dobles estándar.");
+    }
+
+    // 4. Eliminar comas finales colgantes antes de } o ]
     const sinComasColgantes = candidato.replace(/,\s*([}\]])/g, "$1");
     if (sinComasColgantes !== candidato) {
       candidato = sinComasColgantes;
@@ -271,10 +456,20 @@
 
     try {
       const recuperado = JSON.parse(candidato);
+      const normRecuperada = normalizarEstructuraImportada(recuperado, cambios);
+      if (!normRecuperada.ok) {
+        return {
+          ok: false,
+          corregido: false,
+          data: null,
+          cambios: cambios,
+          error: normRecuperada.error
+        };
+      }
       return {
         ok: true,
         corregido: cambios.length > 0,
-        data: recuperado,
+        data: normRecuperada.data,
         cambios: cambios,
         error: null
       };
@@ -291,12 +486,14 @@
 
   global.ValidadorPrompt = {
     ESQUEMA_VERSION: ESQUEMA_VERSION,
+    MAX_CARACTERES_JSON: MAX_CARACTERES_JSON,
     GUIAS_PROVEEDOR: GUIAS_PROVEEDOR,
     SUGERENCIAS_INVESTIGACION: SUGERENCIAS_INVESTIGACION,
     limpiarTexto: limpiarTexto,
     limpiarArregloTexto: limpiarArregloTexto,
     evaluarCondicionales: evaluarCondicionales,
     validarEstado: validarEstado,
+    normalizarEstructuraImportada: normalizarEstructuraImportada,
     analizarYCorregirJson: analizarYCorregirJson
   };
 })(window);
